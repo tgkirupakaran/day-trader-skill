@@ -189,6 +189,43 @@ a business and tax the gains as business income, not tax-free. Use a margin or c
 Set `"account_type"` (`"tfsa"`, `"margin"` or `"cash"`) so `/trader-risk` knows which account it is.
 Not tax advice: talk to a tax professional.
 
+## Autopilot (paper trading bot)
+
+`autopilot/` runs the opening-range breakout by itself, all day, on a paper
+account, and keeps a log and a dashboard of every trade. It is a tool, not a
+skill: it runs without Claude, so the only cost it counts is trading costs.
+
+The rule: note the high and low of the first 15 minutes; buy when a 5-minute
+bar closes above the high; stop at the middle of that range; target one times
+the risk; out by 3:55 PM. Sized to your max loss, with the daily limits from
+`trader/config.json`.
+
+```bash
+python3 autopilot/autopilot.py backtest            # the rule on the last ~60 days -> backtest.html
+python3 autopilot/autopilot.py sweep               # 24 variations, ranked, split into two halves
+python3 autopilot/autopilot.py run                 # paper trade today, simulated fills
+python3 autopilot/autopilot.py run --broker ibkr   # paper trade today in your IBKR paper account
+python3 autopilot/autopilot.py dashboard           # -> trader/autopilot/dashboard.html
+```
+
+Pick a variation with `"or_minutes"`, `"target_r"` and `"stop_rule"` (`"mid"` or
+`"low"`) in `trader/config.json`, and list your symbols in `"autopilot_symbols"`.
+Trying many variations and keeping the best one finds luck as often as skill:
+paper trade your pick before you trust it.
+
+**IBKR paper.** `--broker ibkr` sends each trade to your Interactive Brokers
+paper account as a bracket order (a buy limit, a take-profit and a stop), and
+the log shows IBKR's own fills and commissions. It needs IB Gateway logged in
+with your paper login, its API on (port 4002), and `python3 -m pip install
+ib_async`; nothing else in the pack needs an install. **The paper lock:** it
+refuses the live ports (4001, 7496) and any account that does not start with
+`DU`, and disconnects before a single order.
+
+**Real money is not in this tool.** After a paper run you are happy with, the
+same rule and limits can lead to real orders only through `/trader-broker`, with
+its three gates: a risk-check PASS, your typed yes for that one order, and
+Claude's Allow once card.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does

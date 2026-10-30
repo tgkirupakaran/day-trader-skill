@@ -41,7 +41,8 @@ class Repo(unittest.TestCase):
     def test_root_matches_the_reel(self):
         # trader/ is your own working folder (git-ignored), not part of the pack.
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git") and d != "trader")
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        # autopilot/ is the paper-trading bot: a tool, not a skill, so the pack is still eleven
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "autopilot", "tests"] + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -103,7 +104,7 @@ class Repo(unittest.TestCase):
 
     def test_every_tool_runs_on_python_3_8(self):
         # no 3.9+ only modules or syntax in the tools (the README promises 3.8)
-        for s in SKILLS:
+        for s in SKILLS + ["autopilot"]:
             folder = os.path.join(ROOT, s)
             for f in os.listdir(folder):
                 if not f.endswith(".py"):
