@@ -66,8 +66,10 @@ E = _load("trader-entry", "entry", "autopilot_entry")
 OUT_DIR = os.path.join("trader", "autopilot")
 BAR = datetime.timedelta(minutes=5)
 DEFAULT_SYMBOLS = {
-    "ca": ["RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "ENB.TO", "CNQ.TO", "SU.TO", "SHOP.TO",
-           "CP.TO", "CNR.TO", "TRP.TO", "ATD.TO", "BN.TO", "MFC.TO", "ABX.TO"],
+    "ca": ["RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "BN.TO", "ENB.TO",
+           "TRP.TO", "CNQ.TO", "SU.TO", "CVE.TO", "IMO.TO", "TOU.TO", "ARX.TO", "CNR.TO", "CP.TO", "SHOP.TO",
+           "CSU.TO", "OTEX.TO", "BCE.TO", "T.TO", "RCI.B.TO", "ATD.TO", "L.TO", "DOL.TO", "ABX.TO", "AEM.TO",
+           "K.TO", "WPM.TO", "FNV.TO", "TECK.B.TO", "NTR.TO", "CCO.TO", "FM.TO", "GIB.A.TO", "QSR.TO", "WSP.TO"],
     "us": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "AMD", "GOOGL", "NFLX", "AVGO"],
 }
 DEFAULTS = {
