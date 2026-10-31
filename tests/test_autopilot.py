@@ -97,6 +97,34 @@ class Rule(unittest.TestCase):
         (t,) = ap.day_trades(DAY, {"ABC.TO": b}, cfg(stop_rule="low", target_r=2))
         self.assertEqual((t["stop"], t["target"]), (10.0, 11.83))
 
+    def test_a_thin_volume_break_is_skipped(self):
+        b = bars(RANGE + BREAK + [FLAT] * 80)
+        b[3]["v"] = 1400                                            # 1.4x the range bars' 1,000
+        self.assertEqual(ap.day_trades(DAY, {"ABC.TO": b}, cfg(min_volume_x=1.5)), [])
+        b[3]["v"] = 1600
+        (t,) = ap.day_trades(DAY, {"ABC.TO": b}, cfg(min_volume_x=1.5))
+        self.assertIn("volume 1.5x", t["setup"])
+
+    def test_vwap_reversion(self):
+        # VWAP sits near 10.00; the 9:45 bar closes 2 % under it, the next bar opens 9.80
+        rows = [(10.0, 10.05, 9.95, 10.0)] * 3 + [(9.9, 9.9, 9.78, 9.8), (9.8, 9.85, 9.75, 9.82),
+                                                  (9.85, 10.0, 9.85, 9.98)] + [(9.98, 9.99, 9.97, 9.98)] * 80
+        (t,) = ap.day_trades(DAY, {"ABC.TO": bars(rows)}, cfg(setup="vwap_revert", revert_pct=1.5,
+                                                                revert_stop_pct=1.0))
+        self.assertEqual((t["entry_time"], t["entry"]), ("09:50", 9.81))
+        self.assertEqual(t["stop"], 9.71)                          # 1 % under the entry
+        self.assertEqual(t["reason"], "target")                     # back to where VWAP was
+        self.assertGreater(t["target"], t["entry"])
+        self.assertTrue(t["setup"].startswith("vwap revert 1.5%"))
+        self.assertNotIn("or_high", t)
+
+    def test_sweep_variations(self):
+        vs = ap.variations()
+        self.assertEqual(len(vs), 66)
+        self.assertEqual(sum(1 for v in vs if v["setup"] == "vwap_revert"), 12)
+        for v in vs:
+            ap.check_config(dict(cfg(), **v))
+
     def test_a_tsx_holiday_has_no_trades(self):
         thanksgiving = datetime.date(2026, 10, 12)
         b = bars(RANGE + BREAK + [FLAT] * 80, day=thanksgiving)
@@ -185,7 +213,8 @@ class RealData(unittest.TestCase):
     def test_sweep_ranks_every_variation(self):
         rc, out = self.run_ap("sweep")
         self.assertEqual(rc, 0)
-        self.assertIn("Tried 24 variations", out)
+        self.assertIn("Tried 66 variations", out)
+        self.assertIn("vwap revert", out)
         self.assertIn("first half", out)
 
     def test_run_once_replays_the_day_on_paper(self):

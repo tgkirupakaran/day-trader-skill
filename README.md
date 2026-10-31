@@ -210,6 +210,11 @@ python3 autopilot/autopilot.py dashboard           # -> trader/autopilot/dashboa
 
 Pick a variation with `"or_minutes"`, `"target_r"` and `"stop_rule"` (`"mid"` or
 `"low"`) in `trader/config.json`, and list your symbols in `"autopilot_symbols"`.
+Two filters for the breakout: `"min_volume_x": 1.5` (the breakout bar needs 1.5
+times the opening bars' volume) and `"above_vwap": true`. A second rule,
+`"setup": "vwap_revert"`, buys a close `"revert_pct"` under the day's VWAP, with a
+stop `"revert_stop_pct"` under the entry and VWAP as the target. `sweep` tries 66
+variations and stars only those that made money in both halves on 30+ trades.
 Trying many variations and keeping the best one finds luck as often as skill:
 paper trade your pick before you trust it.
 

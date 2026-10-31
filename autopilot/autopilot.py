@@ -85,6 +85,11 @@ DEFAULTS = {
     "stop_rule": "mid",
     "slippage_per_share": 0.01,
     "or_minutes": 15,
+    "setup": "orb",              # "orb" or "vwap_revert"
+    "min_volume_x": 0,           # orb: the trigger bar's volume vs the range bars' average (0: off)
+    "above_vwap": False,         # orb: the trigger close must also be above the day's VWAP
+    "revert_pct": 1.5,           # vwap_revert: buy a close this far under VWAP
+    "revert_stop_pct": 1.0,      # vwap_revert: stop this far under the entry
     "autopilot_symbols": None,
     # --broker ibkr only (ibkr.py)
     "ibkr_host": "127.0.0.1",
@@ -94,7 +99,10 @@ DEFAULTS = {
     "entry_wait_minutes": 10,    # cancel a BUY that has not filled by then
 }
 MONEY_KEYS = ("max_loss_per_trade", "max_daily_loss", "max_order")
-SWEEP = {"or_minutes": (5, 15, 30), "target_r": (1.0, 1.5, 2.0, 3.0), "stop_rule": ("mid", "low")}
+SWEEP_ORB = {"or_minutes": (5, 15, 30), "target_r": (1.0, 2.0, 3.0), "stop_rule": ("mid", "low"),
+             "filter": ("none", "volume", "vwap")}
+MIN_TRADES = 30                  # the sweep's star wants at least this many trades
+SWEEP_VWAP = {"revert_pct": (1.0, 1.5, 2.0, 3.0), "revert_stop_pct": (0.5, 1.0, 1.5)}
 
 
 class AutopilotError(Exception):
@@ -127,7 +135,7 @@ def check_config(cfg):
     for k in ("no_entries_before", "no_entries_after", "flat_by"):
         E.parse_hhmm(cfg[k], k)
     for k in ("budget", "commission_per_trade", "max_loss_per_trade", "max_daily_loss",
-              "target_r", "slippage_per_share"):
+              "target_r", "slippage_per_share", "min_volume_x", "revert_pct", "revert_stop_pct"):
         cfg[k] = float(cfg[k])
     cfg["max_order"] = float(cfg["max_order"] or cfg["budget"])
     cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
@@ -136,6 +144,11 @@ def check_config(cfg):
         raise AutopilotError("or_minutes wants a multiple of 5, not %s" % cfg["or_minutes"])
     if cfg["stop_rule"] not in ("mid", "low"):
         raise AutopilotError('stop_rule wants "mid" or "low", not %s' % cfg["stop_rule"])
+    if cfg["setup"] not in ("orb", "vwap_revert"):
+        raise AutopilotError('setup wants "orb" or "vwap_revert", not %s' % cfg["setup"])
+    if cfg["revert_pct"] <= 0 or cfg["revert_stop_pct"] <= 0:
+        raise AutopilotError("revert_pct and revert_stop_pct must be above 0")
+    cfg["above_vwap"] = bool(cfg["above_vwap"])
     if cfg["target_r"] <= 0:
         raise AutopilotError("target_r must be above 0")
     if cfg["max_loss_per_trade"] <= 2 * cfg["commission_per_trade"]:
@@ -195,17 +208,51 @@ def closed_only(bars, now_eastern):
 
 # ---------------------------------------------------------------- the rule
 
+def vwap_series(bars, open_dt):
+    """The day's running VWAP after each bar (from the open), by bar index."""
+    pv = vol = 0.0
+    out = []
+    for b in bars:
+        if b["at"] >= open_dt:
+            v = float(b.get("v") or 0)
+            pv += (b["h"] + b["l"] + b["c"]) / 3 * v
+            vol += v
+        out.append(pv / vol if vol else b["c"])
+    return out
+
+
+def setup_name(cfg):
+    if cfg["setup"] == "vwap_revert":
+        return "vwap revert %g%%, stop %g%%" % (cfg["revert_pct"], cfg["revert_stop_pct"])
+    extra = (", volume %gx" % cfg["min_volume_x"] if cfg["min_volume_x"] else "") + \
+        (", above vwap" if cfg["above_vwap"] else "")
+    return "orb %dm, stop %s, %gR%s" % (cfg["or_minutes"], cfg["stop_rule"], cfg["target_r"], extra)
+
+
 def find_trigger(bars, day, cfg, close_dt):
-    """(or_high, or_low, index of the fill bar) or None. The fill bar is the one
-    after the first close above the range; it may not have opened yet."""
+    """The first signal of the day, or None: {"j": index of the fill bar (the one
+    after the signal bar; it may not have opened yet), and how to set the stop and
+    target}. Signal bars must close between no_entries_before and no_entries_after."""
     open_dt = datetime.datetime.combine(day, E.OPEN)
+    first = datetime.datetime.combine(day, E.parse_hhmm(cfg["no_entries_before"], "no_entries_before"))
+    last = E.early_cutoff(day, E.parse_hhmm(cfg["no_entries_after"], "no_entries_after"), close_dt)
+    vw = vwap_series(bars, open_dt)
+    if cfg["setup"] == "vwap_revert":
+        for i, b in enumerate(bars):
+            end = b["at"] + BAR
+            if b["at"] < open_dt or end < first:
+                continue
+            if end > last:
+                return None
+            if b["c"] <= vw[i] * (1 - cfg["revert_pct"] / 100):
+                return {"j": i + 1, "stop_pct": cfg["revert_stop_pct"], "target_px": vw[i]}
+        return None
     or_end = open_dt + datetime.timedelta(minutes=cfg["or_minutes"])
     rng = [b for b in bars if open_dt <= b["at"] < or_end]
     if len(rng) < cfg["or_minutes"] // 5:
         return None
     hi, lo = max(b["h"] for b in rng), min(b["l"] for b in rng)
-    first = datetime.datetime.combine(day, E.parse_hhmm(cfg["no_entries_before"], "no_entries_before"))
-    last = E.early_cutoff(day, E.parse_hhmm(cfg["no_entries_after"], "no_entries_after"), close_dt)
+    avg_v = sum(float(b.get("v") or 0) for b in rng) / len(rng)
     for i, b in enumerate(bars):
         end = b["at"] + BAR
         if b["at"] < or_end or end < first:
@@ -213,7 +260,12 @@ def find_trigger(bars, day, cfg, close_dt):
         if end > last:
             return None
         if b["c"] > hi:
-            return hi, lo, i + 1
+            if cfg["min_volume_x"] and float(b.get("v") or 0) < cfg["min_volume_x"] * avg_v:
+                return None                        # the first break was on thin volume: no trade today
+            if cfg["above_vwap"] and b["c"] <= vw[i]:
+                return None
+            return {"j": i + 1, "or_high": hi, "or_low": lo,
+                    "stop_px": (hi + lo) / 2 if cfg["stop_rule"] == "mid" else lo}
     return None
 
 
@@ -224,22 +276,32 @@ def shares_for(entry, risk, cfg, cash):
     return max(n, 0)
 
 
-def plan_trade(day, sym, hi, lo, fill_at, fill_open, cfg, cash):
+def plan_trade(day, sym, sig, fill_at, fill_open, cfg, cash):
     """The order the rule wants: entry, stop, target, shares. None if it can't size one."""
     m, slip, fee = cfg["market"], cfg["slippage_per_share"], cfg["commission_per_trade"]
     entry = to_tick(fill_open + slip, m, up=True)
-    stop = to_tick((hi + lo) / 2 if cfg["stop_rule"] == "mid" else lo, m, up=False)
+    if "stop_pct" in sig:
+        stop = to_tick(entry * (1 - sig["stop_pct"] / 100), m, up=False)
+    else:
+        stop = to_tick(sig["stop_px"], m, up=False)
     if entry <= stop:
         return None                                # it opened back under the stop
     risk = entry - stop
+    if "target_px" in sig:
+        target = to_tick(sig["target_px"], m, up=True)
+        if target <= entry:
+            return None                                # already back at the target
+    else:
+        target = to_tick(entry + cfg["target_r"] * risk, m, up=True)
     n = shares_for(entry, risk, cfg, cash)
     if n < 1:
         return None
-    return {"date": day.isoformat(), "symbol": sym,
-            "setup": "orb %dm, stop %s, %gR" % (cfg["or_minutes"], cfg["stop_rule"], cfg["target_r"]),
-            "or_high": round(hi, 3), "or_low": round(lo, 3), "entry_time": fill_at.strftime("%H:%M"),
-            "entry": entry, "stop": stop, "target": to_tick(entry + cfg["target_r"] * risk, m, up=True),
-            "shares": n, "fees": money(2 * fee), "risk_total": money(risk * n), "status": "open"}
+    rec = {"date": day.isoformat(), "symbol": sym, "setup": setup_name(cfg),
+           "entry_time": fill_at.strftime("%H:%M"), "entry": entry, "stop": stop, "target": target,
+           "shares": n, "fees": money(2 * fee), "risk_total": money(risk * n), "status": "open"}
+    if "or_high" in sig:
+        rec.update(or_high=round(sig["or_high"], 3), or_low=round(sig["or_low"], 3))
+    return rec
 
 
 def trade_out(bars, j, rec, cfg, flat_dt, final):
@@ -282,7 +344,7 @@ def day_bounds(day, cfg):
 
 
 def day_signals(day, by_symbol, cfg):
-    """[(fill time, symbol, bars, (hi, lo, j))] in fill order, for the bars so far."""
+    """[(fill time, symbol, bars, signal)] in fill order, for the bars so far."""
     b = day_bounds(day, cfg)
     if not b:
         return []
@@ -291,8 +353,8 @@ def day_signals(day, by_symbol, cfg):
     for sym, bars in by_symbol.items():
         bars = [x for x in bars if x["at"] < close_dt]
         hit = find_trigger(bars, day, cfg, close_dt)
-        if hit and hit[2] < len(bars) and bars[hit[2]]["at"] < flat_dt:
-            out.append((bars[hit[2]]["at"], sym, bars, hit))
+        if hit and hit["j"] < len(bars) and bars[hit["j"]]["at"] < flat_dt:
+            out.append((bars[hit["j"]]["at"], sym, bars, hit))
     out.sort(key=lambda c: (c[0], c[1]))
     return out
 
@@ -319,13 +381,13 @@ def day_trades(day, by_symbol, cfg, final=True):
         return []
     flat_dt = b[1]
     taken = []
-    for at, sym, bars, (hi, lo, j) in day_signals(day, by_symbol, cfg):
+    for at, sym, bars, sig in day_signals(day, by_symbol, cfg):
         ok, cash = admit(taken, at, cfg)
         if not ok:
             break
-        rec = plan_trade(day, sym, hi, lo, at, bars[j]["o"], cfg, cash)
+        rec = plan_trade(day, sym, sig, at, bars[sig["j"]]["o"], cfg, cash)
         if rec:
-            taken.append(trade_out(bars, j, rec, cfg, flat_dt, final))
+            taken.append(trade_out(bars, sig["j"], rec, cfg, flat_dt, final))
     return taken
 
 
@@ -540,8 +602,7 @@ def render_dashboard(doc, cfg, title, refresh=None, now=None):
         "<div class=card><table>%s%s</table></div>"
         "<p class=sub>Not financial advice. Paper fills are kinder than real ones.</p></main></body></html>" % (
             meta, CSS, esc(title), source,
-            esc("opening-range breakout, %d min range, stop at the %s, target %gR"
-                % (cfg["or_minutes"], "middle" if cfg["stop_rule"] == "mid" else "low", cfg["target_r"])),
+            esc(setup_name(cfg)),
             m(cfg["commission_per_trade"]), m(cfg["slippage_per_share"]),
             (now or now_eastern()).strftime("%Y-%m-%d %H:%M ET"), esc(verdict(s)),
             "".join("<div class=tile><span>%s</span><b class='%s'>%s</b></div>" % (a, c, esc(b)) for a, b, c in tiles),
@@ -615,34 +676,49 @@ def cmd_backtest(a, cfg):
     return 0
 
 
+def variations():
+    """Every rule the sweep tries, as config overrides."""
+    out = []
+    flt = {"none": {}, "volume": {"min_volume_x": 1.5}, "vwap": {"above_vwap": True}}
+    for orm, tr, sr, f in itertools.product(*SWEEP_ORB.values()):
+        v = dict(setup="orb", or_minutes=orm, target_r=tr, stop_rule=sr, min_volume_x=0, above_vwap=False)
+        v.update(flt[f])
+        out.append(v)
+    for rp, sp in itertools.product(*SWEEP_VWAP.values()):
+        out.append(dict(setup="vwap_revert", revert_pct=rp, revert_stop_pct=sp))
+    return out
+
+
 def cmd_sweep(a, cfg):
     data, missing = fetch_all(symbols_for(cfg, a.symbols), "60d", a.offline, a.pause)
     now = now_eastern(a.now)
     days = sorted(set(d for bars in data.values() for d in bars if d <= now.date()))
-    half = days[len(days) // 2] if days else None
+    half = days[len(days) // 2].isoformat() if days else ""
     rows = []
-    for orm, tr, sr in itertools.product(SWEEP["or_minutes"], SWEEP["target_r"], SWEEP["stop_rule"]):
-        c = check_config(dict(cfg, or_minutes=orm, target_r=tr, stop_rule=sr))
+    for v in variations():
+        c = check_config(dict(cfg, **v))
         trades = replay(data, c, now)
-        s = summary(trades)
-        early = summary([t for t in trades if half and t["date"] < half.isoformat()])
-        late = summary([t for t in trades if half and t["date"] >= half.isoformat()])
-        rows.append((orm, tr, sr, s, early, late))
-    rows.sort(key=lambda r: -(r[3]["net_pnl"]))
+        rows.append((setup_name(c), v, summary(trades), summary([t for t in trades if t["date"] < half]),
+                     summary([t for t in trades if t["date"] >= half])))
+    rows.sort(key=lambda r: -(r[2]["net_pnl"]))
     if missing:
         print("skipped: " + "; ".join(missing))
     print("%d symbols, %d days. Ranked by net P/L after costs. 'first half' and 'second half' split the days:"
           % (len(data), len(days)))
-    print("a variation that only works in one half is probably luck.\n")
-    print("%-6s %-6s %-5s %7s %6s %12s %12s %12s %12s" % (
-        "range", "target", "stop", "trades", "won", "before costs", "after costs", "first half", "second half"))
-    for orm, tr, sr, s, early, late in rows:
-        print("%-6s %-6s %-5s %7d %5s%% %12s %12s %12s %12s" % (
-            "%dm" % orm, "%gR" % tr, sr, s["trades"], "-" if s["win_rate"] is None else "%.0f" % (100 * s["win_rate"]),
+    print("a variation that only works in one half is probably luck. * = made money in both halves, on %d+ "
+          "trades (fewer proves nothing).\n" % MIN_TRADES)
+    print("%-44s %6s %5s %12s %12s %11s %11s" % (
+        "rule", "trades", "won", "before costs", "after costs", "first half", "second half"))
+    for name, v, s, early, late in rows:
+        both = "*" if early["net_pnl"] > 0 and late["net_pnl"] > 0 and s["trades"] >= MIN_TRADES else " "
+        print("%s%-43s %6d %4s%% %12s %12s %11s %11s" % (
+            both, name, s["trades"], "-" if s["win_rate"] is None else "%.0f" % (100 * s["win_rate"]),
             fmt_money(s["gross_pnl"], E.SIGN), fmt_money(s["net_pnl"], E.SIGN),
             fmt_money(early["net_pnl"], E.SIGN), fmt_money(late["net_pnl"], E.SIGN)))
+    best = rows[0][1] if rows else {}
     print("\nTried %d variations: the best of many looks good partly by chance. Paper trade the one you pick "
-          "before you trust it. Set it in trader/config.json (or_minutes, target_r, stop_rule)." % len(rows))
+          "before you trust it. The top one in trader/config.json would be:\n  %s" % (
+              len(rows), json.dumps({k: v for k, v in best.items() if v not in (0, False) or k == "setup"})))
     return 0
 
 
@@ -727,6 +803,11 @@ def main(argv=None):
         p.add_argument("--or-minutes", type=int)
         p.add_argument("--target-r", type=float)
         p.add_argument("--stop-rule", choices=["mid", "low"])
+        p.add_argument("--setup", choices=["orb", "vwap_revert"])
+        p.add_argument("--min-volume-x", type=float)
+        p.add_argument("--above-vwap", action="store_const", const=True)
+        p.add_argument("--revert-pct", type=float)
+        p.add_argument("--revert-stop-pct", type=float)
     for name in ("backtest", "sweep"):
         sub.choices[name].add_argument("--pause", type=float, default=0.5, help="seconds between Yahoo requests")
     sub.choices["run"].add_argument("--broker", choices=["sim", "ibkr"], default="sim")
@@ -739,8 +820,9 @@ def main(argv=None):
         ap.print_help()
         return 2
     try:
-        cfg = read_config(a.config, a.market, or_minutes=getattr(a, "or_minutes", None),
-                          target_r=getattr(a, "target_r", None), stop_rule=getattr(a, "stop_rule", None))
+        cfg = read_config(a.config, a.market, **{k: getattr(a, k, None) for k in (
+            "or_minutes", "target_r", "stop_rule", "setup", "min_volume_x", "above_vwap", "revert_pct",
+            "revert_stop_pct")})
         return {"backtest": cmd_backtest, "sweep": cmd_sweep, "run": cmd_run, "dashboard": cmd_dashboard}[a.cmd](a, cfg)
     except (AutopilotError, E.EntryError) as e:
         print("autopilot: %s" % e, file=sys.stderr)

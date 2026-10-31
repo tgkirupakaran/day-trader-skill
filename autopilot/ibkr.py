@@ -158,12 +158,12 @@ class IBKRPaperBroker(object):
                 hit = ap.find_trigger([b for b in bars if b["at"] < close_dt], day, cfg, close_dt)
                 if not hit:
                     continue
-                trig = bars[hit[2] - 1]
+                trig = bars[hit["j"] - 1]
                 ok, cash = ap.admit(today, now, cfg)
                 if not ok:
                     break
                 ref_px = trig["c"]
-                rec = ap.plan_trade(day, sym, hit[0], hit[1], trig["at"] + ap.BAR, ref_px, cfg, cash)
+                rec = ap.plan_trade(day, sym, hit, trig["at"] + ap.BAR, ref_px, cfg, cash)
                 if not rec:
                     continue
                 buf = float(cfg.get("entry_buffer_pct") or 0.2) / 100
