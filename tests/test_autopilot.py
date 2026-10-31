@@ -194,6 +194,13 @@ class RealData(unittest.TestCase):
                                        "--offline", self.off, "--now", "2026-10-28 17:00"])
         return rc, out.getvalue()
 
+    def run_ap_at(self, *args, now):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ap.main(list(args) + ["--config", self.cfg, "--symbols", "RY.TO,SHOP.TO",
+                                       "--offline", self.off, "--now", now])
+        return rc, out.getvalue()
+
     def test_backtest(self):
         rc, out = self.run_ap("backtest")
         self.assertEqual(rc, 0)
@@ -217,15 +224,83 @@ class RealData(unittest.TestCase):
         self.assertIn("vwap revert", out)
         self.assertIn("first half", out)
 
-    def test_run_once_replays_the_day_on_paper(self):
+    def test_run_after_the_close_logs_no_hindsight_trades(self):
         rc, out = self.run_ap("run", "--once")
         self.assertEqual(rc, 0)
         self.assertIn("simulated fills", out)
         with open(os.path.join("trader", "autopilot", "trades.json")) as fh:
             doc = json.load(fh)
-        self.assertEqual(doc["broker"], "sim")
-        self.assertTrue(all(t["date"] == "2026-10-28" for t in doc["trades"]))
+        self.assertEqual((doc["broker"], doc["watching"]), ("sim", {"2026-10-28": "17:00"}))
+        self.assertEqual(doc["trades"], [])                        # started at 5 PM: nothing counts
         self.assertTrue(os.path.exists(os.path.join("trader", "autopilot", "dashboard.html")))
+
+    def test_run_counts_only_what_it_watched(self):
+        # Oct 23: the rule fills SHOP.TO at 9:55 and RY.TO at 15:20
+        self.run_ap_at("run", "--once", now="2026-10-23 09:31")
+        self.run_ap_at("run", "--once", now="2026-10-23 17:00")
+        log = os.path.join("trader", "autopilot", "trades.json")
+        with open(log) as fh:
+            doc = json.load(fh)
+        self.assertEqual([(t["symbol"], t["entry_time"]) for t in doc["trades"]],
+                         [("SHOP.TO", "09:55"), ("RY.TO", "15:20")])
+        os.remove(log)                                              # started at noon instead
+        self.run_ap_at("run", "--once", now="2026-10-23 12:00")
+        self.run_ap_at("run", "--once", now="2026-10-23 17:00")
+        with open(log) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["watching"], {"2026-10-23": "12:00"})
+        self.assertEqual([t["symbol"] for t in doc["trades"]], ["RY.TO"])
+
+    def run_ap_at(self, *args, now):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = ap.main(list(args) + ["--config", self.cfg, "--symbols", "RY.TO,SHOP.TO",
+                                       "--offline", self.off, "--now", now])
+        return rc, out.getvalue()
+
+    def test_backtest(self):
+        rc, out = self.run_ap("backtest")
+        self.assertEqual(rc, 0)
+        with open(os.path.join("trader", "autopilot", "backtest.json")) as fh:
+            doc = json.load(fh)
+        s = ap.summary(doc["trades"])
+        self.assertEqual((s["trades"], s["wins"], s["days"]), (62, 21, 46))
+        self.assertEqual((s["gross_pnl"], s["fees"], s["net_pnl"]), (-450.11, 124.0, -574.11))
+        self.assertIn("Losing on paper, even before commissions.", out)
+        self.assertTrue(all(t["entry_time"] >= "09:50" and t["exit_time"] <= "15:55" for t in doc["trades"]))
+        with open(os.path.join("trader", "autopilot", "backtest.html"), encoding="utf-8") as fh:
+            page = fh.read()
+        self.assertIn("Net P/L after costs", page)
+        self.assertEqual(page.count("<tr>") - 1, 62)
+        self.assertIn("-C$574.11", page)
+
+    def test_sweep_ranks_every_variation(self):
+        rc, out = self.run_ap("sweep")
+        self.assertEqual(rc, 0)
+        self.assertIn("Tried 66 variations", out)
+        self.assertIn("vwap revert", out)
+        self.assertIn("first half", out)
+
+    def test_run_after_the_close_logs_no_hindsight_trades(self):
+        rc, out = self.run_ap("run", "--once")
+        self.assertEqual(rc, 0)
+        self.assertIn("simulated fills", out)
+        with open(os.path.join("trader", "autopilot", "trades.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual((doc["broker"], doc["watching"]), ("sim", {"2026-10-28": "17:00"}))
+        self.assertEqual(doc["trades"], [])                        # started at 5 PM: nothing counts
+        self.assertTrue(os.path.exists(os.path.join("trader", "autopilot", "dashboard.html")))
+
+    def test_run_counts_only_what_it_watched(self):
+        self.run_ap_at("run", "--once", now="2026-10-28 09:31")
+        rc, _ = self.run_ap_at("run", "--once", now="2026-10-28 17:00")
+        with open(os.path.join("trader", "autopilot", "trades.json")) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["watching"], {"2026-10-28": "09:31"})
+        replay = ap.day_trades(DAY, {s: b[DAY] for s, b in
+                                     ((s, ap.fetch(s, "1d", self.off)) for s in ("RY.TO", "SHOP.TO"))},
+                               ap.read_config(self.cfg))
+        self.assertEqual([t["symbol"] for t in doc["trades"]], [t["symbol"] for t in replay])
 
 
 # ---------------------------------------------------------------- IBKR, against a stand-in

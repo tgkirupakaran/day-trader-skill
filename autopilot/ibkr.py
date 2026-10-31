@@ -138,7 +138,7 @@ class IBKRPaperBroker(object):
                 out.setdefault(ref, []).append(f)
         return out
 
-    def sync(self, day, by_symbol, cfg, now, final):
+    def sync(self, day, by_symbol, cfg, now, final, since=None):
         ap = self.ap
         bounds = ap.day_bounds(day, cfg)
         if not bounds:
@@ -159,6 +159,9 @@ class IBKRPaperBroker(object):
                 if not hit:
                     continue
                 trig = bars[hit["j"] - 1]
+                if now - (trig["at"] + ap.BAR) > datetime.timedelta(minutes=10) or \
+                        (since and trig["at"] + ap.BAR < since):
+                    continue                            # a stale signal: the moment has passed
                 ok, cash = ap.admit(today, now, cfg)
                 if not ok:
                     break

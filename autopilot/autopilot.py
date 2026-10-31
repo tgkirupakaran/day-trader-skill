@@ -375,15 +375,18 @@ def admit(taken, at, cfg):
     return True, cfg["budget"] - busy
 
 
-def day_trades(day, by_symbol, cfg, final=True):
+def day_trades(day, by_symbol, cfg, final=True, since=None):
     """Every simulated paper trade on `day`, across symbols, in the order they fill.
-    by_symbol: {symbol: [bars of that day, New York time, closed only]}."""
+    by_symbol: {symbol: [bars of that day, New York time, closed only]}. since: the
+    bot only counts fills at or after this time (when it started watching)."""
     b = day_bounds(day, cfg)
     if not b:
         return []
     flat_dt = b[1]
     taken = []
     for at, sym, bars, sig in day_signals(day, by_symbol, cfg):
+        if since and at < since:
+            continue                               # before the bot was watching: hindsight
         ok, cash = admit(taken, at, cfg)
         if not ok:
             break
@@ -638,8 +641,8 @@ class SimBroker(object):
     """Fills come from the bars themselves: the trades day_trades() simulates."""
     name = "sim"
 
-    def sync(self, day, by_symbol, cfg, now, final):
-        return day_trades(day, by_symbol, cfg, final=final)
+    def sync(self, day, by_symbol, cfg, now, final, since=None):
+        return day_trades(day, by_symbol, cfg, final=final, since=since)
 
     def wait(self, seconds):
         time.sleep(seconds)
@@ -736,10 +739,15 @@ def one_pass(broker, syms, cfg, now, offline=None, log_path=None):
         except Exception as e:
             print("%s: %s" % (sym, e), file=sys.stderr)
     final = now.time() >= sess[1]
-    trades = broker.sync(day, by, cfg, now, final)
+    # A paper trade counts only if the bot was watching when it happened: started
+    # at 2 PM (or after the close), it does not log the morning's trades with hindsight.
+    watching = dict(read_log(log_path).get("watching") or {})
+    first = watching.setdefault(day.isoformat(), now.strftime("%H:%M"))
+    since = datetime.datetime.combine(day, datetime.datetime.strptime(first, "%H:%M").time())
+    trades = broker.sync(day, by, cfg, now, final, since)
     doc = merge(log_path, trades, {day.isoformat()})
-    if doc.get("broker") != broker.name:
-        doc["broker"] = broker.name
+    if doc.get("broker") != broker.name or doc.get("watching") != watching:
+        doc.update(broker=broker.name, watching=watching)
         write_json(log_path, doc)
     return trades
 
